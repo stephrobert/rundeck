@@ -1,0 +1,197 @@
+---
+- hosts: all
+  gather_facts: true
+  become: true
+  vars:
+    ## rundeck
+    rundeck_version: 3.4.10-20220118
+    rundeck_os_group: rundeck
+    rundeck_os_user: rundeck
+    timezone: Europe/Paris
+    rundeck_installation_dir: /opt
+    rundeck_data_dir: /data/rundeck
+    nfs_path : 192.168.1.42:/home/data
+    # nfs_path: 192.168.122.1:/home/vagrant/Projets/rundeck/data
+
+    ## Nginx
+    nginx_version: 1.18
+    nginx_fqdn: rundeck.robert.local
+    cert_file: "{{ nginx_fqdn }}+3.pem"
+    cert_key: "{{ nginx_fqdn }}+3-key.pem"
+  tasks:
+    # - name: "Check rundeck-latest link stat in {{ rundeck_installation_dir }}"
+    #   ansible.builtin.stat:
+    #     path: "{{ rundeck_installation_dir }}/rundeck"
+    #   register: running_version
+    # - name: Register current running version if any
+    #   ansible.builtin.set_fact:
+    #     rundeck_version_running: >-
+    #       {{
+    #         running_version.stat.lnk_target
+    #         | regex_replace('^.*/rundeck-(\d*\.\d*\.\d*-\d*)', '\1')
+    #       }}
+    #   when:
+    #     - running_version.stat.exists | default(false)
+    #     - running_version.stat.islnk | default(false)
+    - name: create group rundeck
+      ansible.builtin.group:
+        name: "{{ rundeck_os_group }}"
+        state: present
+    - name: create user rundeck
+      ansible.builtin.user:
+        name: "{{ rundeck_os_user }}"
+        groups: "{{ rundeck_os_group }}"
+        append: yes
+    - name: install packages
+      ansible.builtin.package:
+        state: present
+        name:
+          - glibc-common
+          - glibc-langpack-en
+          - glibc-langpack-fr
+          - java
+          - tar
+          - unzip
+          - epel-release
+          - python3-libsemanage
+          - python3-pip
+          - policycoreutils-python-utils
+    - name: set as default locale
+      ansible.builtin.command: localectl set-locale LANG=en_US.UTF-8
+    - name: Set timezone
+      community.general.timezone:
+        name: "{{ timezone }}"
+    - name: mount nfs /data
+      ansible.posix.mount:
+        src: "{{ nfs_path }}"
+        path: /data
+        # opts: vers=4,udp
+        state: mounted
+        fstype: nfs
+    - name: mount /dev/shm
+      ansible.posix.mount:
+        fstype: tmpfs
+        name: "/dev/shm"
+        opts: "defaults,nodev,nosuid,noexec"
+        src: tmpfs
+        state: mounted
+    - name: Create rundeck directory
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: "directory"
+        owner: "{{ rundeck_os_user }}"
+        group: "{{ rundeck_os_group }}"
+        mode: 0755
+      with_items:
+      - "{{ rundeck_installation_dir }}"
+      - "{{ rundeck_data_dir }}"
+      # - "{{ rundeck_tmp_dir }}"
+      # - "{{ rundeck_data_dir }}/log"
+      # - "{{ rundeck_data_dir }}/tmp"
+    - name: Create directory
+      ansible.builtin.file:
+        path: "{{ rundeck_installation_dir }}/rundeck-{{ rundeck_version }}"
+        state: directory
+        owner: "{{ rundeck_os_user }}"
+        group: "{{ rundeck_os_group }}"
+        mode: 0755
+    - name: install rundeck
+      become_user: rundeck
+      ansible.builtin.get_url:
+        url: "https://packagecloud.io/pagerduty/rundeck/packages/java/org.rundeck/rundeck-{{ rundeck_version }}.war/artifacts/rundeck-{{ rundeck_version }}.war/download"
+        dest: "{{ rundeck_installation_dir }}/rundeck-{{ rundeck_version }}/rundeck.war"
+        owner: "{{ rundeck_os_user }}"
+    - name: uncompress war
+      become_user: "{{ rundeck_os_user }}"
+      ansible.builtin.command:
+        cmd: "java -jar rundeck.war --installonly"
+        chdir: "{{ rundeck_installation_dir }}/rundeck-{{ rundeck_version }}"
+      environment:
+        RDECK_BASE: "{{ rundeck_installation_dir }}/rundeck-{{ rundeck_version }}"
+    - name: Update symlink rundeck
+      ansible.builtin.file:
+        path: "{{ rundeck_installation_dir }}/rundeck"
+        src: "{{ rundeck_installation_dir }}/rundeck-{{ rundeck_version }}"
+        owner: "{{ rundeck_os_user }}"
+        group: "{{ rundeck_os_group }}"
+        state: link
+    - name: Update configuration
+      ansible.builtin.template:
+        src: templates/rundeck-config.properties
+        dest: "{{ rundeck_installation_dir }}/rundeck/server/config"
+        owner: "{{ rundeck_os_user }}"
+        group: "{{ rundeck_os_group }}"
+        mode: 0644
+    - name: Upgrade pip
+      become_user: "{{ rundeck_os_user }}"
+      ansible.builtin.pip:
+        name:
+          - pip
+        extra_args: --user --upgrade
+    - name: Install ansible
+      become_user: "{{ rundeck_os_user }}"
+      ansible.builtin.pip:
+        name:
+          - ansible
+        version: 4.10.0
+        extra_args: --user
+    - name: get list of services
+      ansible.builtin.service_facts:
+    - name: Stop rundeck service
+      ansible.builtin.service:
+        name: rundeck
+        enabled: true
+        state: stopped
+      when: "'rundeck.service' in ansible_facts.services"
+    - name: Create systemd service configuration
+      ansible.builtin.template:
+        src: "rundeck.service"
+        dest: "/etc/systemd/system"
+        mode: 0755
+    - name: Reload systemd service configuration
+      ansible.builtin.service:
+        name: rundeck
+        enabled: true
+        state: restarted
+        daemon_reload: yes
+    - name: Install tools for debug
+      ansible.builtin.package:
+        name:
+          - htop
+          - net-tools
+        state: present
+# Deploy Nginx
+    - name: install nginx
+      dnf:
+        name: '@nginx:{{ nginx_version }}'
+        state: present
+    - name: template nginx configuration
+      ansible.builtin.template:
+        src: rundeck.conf
+        dest: /etc/nginx/conf.d/rundeck.conf
+        mode: 0640
+      notify: reload_nginx
+    - name: copy certificate
+      ansible.builtin.copy:
+        src: "files/{{ item }}"
+        dest: "/etc/ssl/{{ item }}"
+        mode: 0640
+      with_items:
+        - "{{ cert_file }}"
+        - "{{ cert_key }}"
+      notify: reload_nginx
+    - name: set sebool httpd can network connect to on
+      ansible.posix.seboolean:
+        name: httpd_can_network_connect
+        state: yes
+        persistent: yes
+    - name: enable & start nginx
+      ansible.builtin.service:
+        name: nginx
+        enabled: yes
+        state: started
+  handlers:
+    - name: reload_nginx
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded

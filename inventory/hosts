@@ -1,0 +1,1 @@
+rundeck server_address=rundeck.robert.local rundeck_xmx=1024m rundeck_xms=256m rundeck_maxmetaspacesize=256m

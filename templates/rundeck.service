@@ -1,0 +1,23 @@
+[Unit]
+Description=Rundeck
+
+[Service]
+Type=simple
+SyslogLevel=debug
+User=rundeck
+ExecStart= /usr/bin/java -Xmx{{ rundeck_xmx }} -Xms{{ rundeck_xms }} -XX:MaxMetaspaceSize={{ rundeck_maxmetaspacesize }} -server -jar /opt/rundeck/rundeck.war
+KillSignal=SIGTERM
+KillMode=mixed
+WorkingDirectory=/opt/rundeck
+
+LimitNOFILE=65535
+LimitNPROC=65535
+TasksMax=infinity
+ExecReload=/bin/kill -HUP $MAINPID
+TimeoutStopSec=120
+SyslogIdentifier=IRI
+Restart=on-failure
+RestartSec=120
+
+[Install]
+WantedBy=multi-user.target
